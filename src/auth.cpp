@@ -4,7 +4,8 @@
 #include <logger.h>
 #include <optarg.h>
 #include <security/pam_misc.h>
-#include <cstring>
+#include <conf.h>
+#include <file.h>
 
 using namespace suex;
 using namespace suex::optargs;
@@ -38,19 +39,11 @@ void SetToken(time_t ts, const std::string &filename) {
   std::ofstream f(filename);
   DEFER(f.close());
   f << ts;
-
-  // chmod 440
-  if (chmod(filename.c_str(), S_IRUSR | S_IRGRP) < 0) {
-    throw suex::PermissionError(std::strerror(errno));
-  }
-  // chown root:root
-  if (chown(filename.c_str(), 0, 0) < 0) {
-    throw suex::PermissionError(std::strerror(errno));
-  }
+  file::Secure(filename);
 }
 
 time_t GetToken(const std::string &filename) {
-  struct stat fstat {};
+  struct stat fstat{};
 
   if (stat(filename.c_str(), &fstat) != 0) {
     SetToken(0, filename);
@@ -63,8 +56,7 @@ time_t GetToken(const std::string &filename) {
     throw suex::IOError("auth timestamp is not a file");
   }
 
-  if (fstat.st_uid != 0 || fstat.st_gid != 0 ||
-      utils::PermissionBits(fstat) != 440) {
+  if (!file::IsSecure(filename)) {
     throw suex::PermissionError("auth timestamp file has invalid permissions");
   }
 
@@ -77,7 +69,7 @@ time_t GetToken(const std::string &filename) {
 
 int PamConversation(int, const struct pam_message **,
                     struct pam_response **resp, void *appdata) {
-  auto auth_data = *(struct auth_data *)appdata;
+  auto auth_data = *(struct auth_data *) appdata;
   if (!auth_data.prompt) {
     return PAM_AUTH_ERR;
   }
@@ -126,9 +118,9 @@ bool auth::Authenticate(const std::string &service_name, bool prompt,
                         const std::string &cache_token) {
   logger::debug() << "Authenticating | "
                   << "policy: " << service_name << " | "
-                                                   "cache: "
+                  << "cache: "
                   << (cache_token.empty() ? "off" : "on") << " | "
-                                                             "prompt: "
+                  << "prompt: "
                   << (prompt ? "on" : "off") << std::endl;
 
   if (!PolicyExists(service_name)) {
@@ -169,11 +161,11 @@ bool auth::Authenticate(const std::string &service_name, bool prompt,
   }
 
   DEFER({
-    retval = pam_end(handle, retval);
-    if (retval != PAM_SUCCESS) {
-      logger::debug() << "[pam]: pam_end returned " << retval << std::endl;
-    }
-  });
+          retval = pam_end(handle, retval);
+          if (retval != PAM_SUCCESS) {
+            logger::debug() << "[pam]: pam_end returned " << retval << std::endl;
+          }
+        });
 
   retval = pam_authenticate(handle, 0);
   if (retval != PAM_SUCCESS) {

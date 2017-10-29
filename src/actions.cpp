@@ -4,13 +4,16 @@
 #include <logger.h>
 #include <version.h>
 #include <wait.h>
+#include <file.h>
 
 using namespace suex;
 using suex::permissions::Permissions;
 using suex::permissions::User;
 using suex::optargs::OptArgs;
+using namespace suex::utils;
 
 #define PATH_EDIT_LOCK PATH_VAR_RUN "/suex/edit.lock"
+#define PATH_CONFIG_TMP "/tmp/suex.conf"
 
 void suex::ShowPermissions(permissions::Permissions &permissions) {
   if (permissions.Privileged()) {
@@ -57,7 +60,7 @@ void suex::SwitchUserAndExecute(const User &user, char *const *cmdargv,
 
   // will not get here unless execvp failed
   throw std::runtime_error(utils::CommandArgsText(cmdargv) + " : " +
-                           std::strerror(errno));
+      std::strerror(errno));
 }
 
 void suex::TurnOnVerboseOutput(const permissions::Permissions &permissions) {
@@ -94,45 +97,28 @@ void suex::EditConfiguration(const OptArgs &opts,
   if (utils::path::Exists(PATH_EDIT_LOCK)) {
     auto prompt =
         "suex.conf is already being edited from another session, do you want "
-        "to continue anyway?";
+            "to continue anyway?";
+
     if (!utils::AskQuestion(prompt)) {
-      throw suex::PermissionError(
-          "suex.conf is being edited from another session");
+      throw suex::PermissionError("suex.conf is being edited from another session");
     }
-    if (remove(PATH_EDIT_LOCK) != 0) {
-      throw suex::IOError("%s: %s", PATH_EDIT_LOCK, std::strerror(errno));
-    }
+
+    file::Remove(PATH_EDIT_LOCK);
   }
 
   if (!auth::Authenticate(permissions.AuthService(), true)) {
     throw suex::PermissionError("Incorrect password");
   }
 
-  utils::path::Touch(PATH_EDIT_LOCK);
-  Permissions::SecureFile(PATH_EDIT_LOCK);
-
-  std::string tmpconf{"/tmp/suex.tmp"};
-  utils::path::Touch(tmpconf);
-  Permissions::SecureFile(tmpconf);
-
+  file::Create(PATH_EDIT_LOCK, true);
+  file::Clone(PATH_CONFIG, PATH_EDIT_LOCK, true);
   DEFER({
-    if (remove(PATH_EDIT_LOCK) != 0) {
-      throw suex::IOError("%s: %s", PATH_EDIT_LOCK, std::strerror(errno));
-    }
-
-    if (utils::path::Exists(tmpconf) && remove(tmpconf.c_str()) != 0) {
-      throw suex::IOError("%s: %s", tmpconf.c_str(), std::strerror(errno));
-    }
-  });
-
-  utils::path::Copy(PATH_CONFIG, tmpconf);
-
-  if (chmod(tmpconf.c_str(), S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP) < 0) {
-    throw suex::IOError("%s: %s", tmpconf.c_str(), std::strerror(errno));
-  }
+          file::Remove(PATH_EDIT_LOCK);
+          file::Remove(PATH_CONFIG_TMP);
+        });
 
   std::vector<char *> cmdargv{strdup(utils::GetEditor().c_str()),
-                              strdup(tmpconf.c_str()), nullptr};
+                              strdup(PATH_CONFIG_TMP), nullptr};
 
   // loop until configuration is valid
   // or user asked to stop
@@ -150,16 +136,15 @@ void suex::EditConfiguration(const OptArgs &opts,
 
     // parent process should wait until the child exists
     int status;
-    while (-1 == waitpid(pid, &status, 0))
-      ;
+    while (-1 == waitpid(pid, &status, 0));
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
       throw std::runtime_error("error while waiting for $EDITOR");
     }
 
     // update the file permissions after editing it
-    if (Permissions::Validate(tmpconf, opts.AuthService())) {
-      utils::path::Move(tmpconf, PATH_CONFIG);
-      Permissions::SecureFile(PATH_CONFIG);
+    if (Permissions::Validate(PATH_CONFIG_TMP, opts.AuthService())) {
+
+      file::Clone(PATH_CONFIG_TMP, PATH_CONFIG, true);
       std::cout << PATH_CONFIG << " changes applied." << std::endl;
       return;
     }
@@ -179,10 +164,15 @@ void suex::CheckConfiguration(const OptArgs &opts) {
       throw suex::ConfigError("configuration is not valid");
     }
 
-    if (!Permissions::IsFileSecure(opts.ConfigPath())) {
-      throw suex::ConfigError("configuration is not valid");
+    if (opts.ConfigPath() == PATH_CONFIG &&
+        !file::IsSecure(opts.ConfigPath())) {
+      throw suex::ConfigError("configuration file is not secure");
     }
+
+    // done here
+    return;
   }
+
   Permissions perms{opts.ConfigPath(), opts.AuthService()};
 
   auto perm = perms.Get(opts.AsUser(), opts.CommandArguments());
